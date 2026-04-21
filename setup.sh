@@ -19,19 +19,27 @@ info "Creazione script /usr/local/bin/dbeaver-update..."
 sudo tee /usr/local/bin/dbeaver-update > /dev/null << 'SCRIPT'
 #!/usr/bin/env bash
 set -e
-set -o pipefail
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
-
-log_info()    { echo -e "${GREEN}[INFO]${NC} $1"; }
-log_error()   { echo -e "${RED}[ERROR]${NC} $1"; }
-log_warning() { echo -e "${YELLOW}[WARNING]${NC} $1"; }
-
+LOCK_FILE="/tmp/dbeaver-update.lock"
 GITHUB_API="https://api.github.com/repos/dbeaver/dbeaver/releases/latest"
+
+cleanup() {
+    rm -f "$LOCK_FILE"
+    rm -rf "$TMP_DIR"
+}
+trap cleanup EXIT
+
+if [ -f "$LOCK_FILE" ]; then
+    PID=$(cat "$LOCK_FILE")
+    if kill -0 "$PID" 2>/dev/null; then
+        MSG="⚠️ Update già in corso (PID: $PID)"
+        echo "$MSG"
+        notify-send "DBeaver" "$MSG" --icon=dbeaver 2>/dev/null || true
+        exit 1
+    fi
+    rm -f "$LOCK_FILE"
+fi
+echo $$ > "$LOCK_FILE"
 
 echo ""
 echo "╔══════════════════════════════════════════╗"
@@ -39,50 +47,76 @@ echo "║        DBeaver Update Checker            ║"
 echo "╚══════════════════════════════════════════╝"
 echo ""
 
-log_info "Controllo versione DBeaver installata..."
+notify-send "DBeaver" "🔍 Controllo aggiornamenti..." --icon=dbeaver 2>/dev/null || true
+
+echo "🔍 Controllo versione DBeaver installata..."
 INSTALLED=""
 if dpkg-query -W -f='${Status}' dbeaver-ce 2>/dev/null | grep -q "install ok installed"; then
     INSTALLED=$(dpkg-query --showformat='${Version}' --show dbeaver-ce 2>/dev/null)
-    log_info "Versione installata: $INSTALLED"
+    echo "   Versione installata: $INSTALLED"
 else
-    log_warning "DBeaver non risulta installato tramite .deb"
+    echo "   DBeaver non ancora installato."
 fi
 
-log_info "Controllo ultima versione disponibile su GitHub..."
-API_RESPONSE=$(curl -fsSL "$GITHUB_API")
+echo "🌐 Recupero ultima versione disponibile..."
+notify-send "DBeaver" "🌐 Controllo server..." --icon=dbeaver 2>/dev/null || true
+
+set -o pipefail
+API_RESPONSE=$(curl -fsSL "$GITHUB_API" 2>&1)
+CURL_EXIT=$?
+if [ $CURL_EXIT -ne 0 ]; then
+    MSG="❌ Errore curl (exit $CURL_EXIT)"
+    echo "$MSG"
+    notify-send "DBeaver" "$MSG" --icon=dbeaver 2>/dev/null || true
+    exit 1
+fi
+
 REMOTE_VERSION=$(echo "$API_RESPONSE" | grep '"tag_name"' | head -1 | grep -oP '"tag_name":\s*"\K[^"]+' )
 
 if [ -z "$REMOTE_VERSION" ]; then
-    log_error "Impossibile recuperare l'ultima versione. Verifica la connessione internet."
-    log_warning "Avvio DBeaver senza aggiornamento..."
-    notify-send "DBeaver" "⚠️ Impossibile verificare aggiornamenti" --icon=dbeaver 2>/dev/null || true
-    exec dbeaver
+    MSG="❌ Impossibile recuperare versione"
+    echo "$MSG"
+    notify-send "DBeaver" "$MSG" --icon=dbeaver 2>/dev/null || true
+    exit 1
 fi
 
-log_info "Ultima versione disponibile: $REMOTE_VERSION"
+echo "   Ultima versione: $REMOTE_VERSION"
 REMOTE_CLEAN="${REMOTE_VERSION#v}"
 
 if [ -n "$INSTALLED" ] && [ "$INSTALLED" = "$REMOTE_CLEAN" ]; then
-    log_info "DBeaver è già aggiornato ($INSTALLED). Avvio in corso..."
+    echo "✅ DBeaver è già aggiornato ($INSTALLED)."
     notify-send "DBeaver" "✅ Già aggiornato ($INSTALLED)" --icon=dbeaver 2>/dev/null || true
-    exec dbeaver
+    exit 0
 fi
 
-echo ""
 if [ -n "$INSTALLED" ]; then
-    log_warning "Nuova versione disponibile: $REMOTE_CLEAN (installata: $INSTALLED)"
+    MSG="Nuova versione: $REMOTE_CLEAN (installata: $INSTALLED)"
 else
-    log_warning "DBeaver $REMOTE_CLEAN è disponibile."
+    MSG="DBeaver $REMOTE_CLEAN è disponibile."
 fi
 
-read -r -p "$(echo -e "${BLUE}[?]${NC} Vuoi aggiornare ora? [Y/n] ")" answer
+notify-send "DBeaver" "⚠️ $MSG" --icon=dbeaver 2>/dev/null || true
 
-if [[ "$answer" == "n" || "$answer" == "N" ]]; then
-    log_info "Aggiornamento rimandato. Avvio DBeaver..."
-    exec dbeaver
+if [ -t 0 ] && [ -t 1 ]; then
+    echo "⚠️ $MSG"
+    read -r -p "$(echo -e "🔔 Vuoi aggiornare ora? [Y/n] ")" answer
+    if [[ "$answer" == "n" || "$answer" == "N" ]]; then
+        echo "✅ Aggiornamento rimandato. Avvio DBeaver..."
+        exec dbeaver
+    fi
+else
+    if command -v zenity &>/dev/null; then
+        zenity --question --title="DBeaver Update" --text="$MSG\n\nVuoi aggiornare ora?" --ok-label="Aggiorna" --cancel-label="Annulla" 2>/dev/null || exec dbeaver
+    else
+        echo "⚠️ $MSG - zenity non disponibile, avvio DBeaver..."
+        notify-send "DBeaver" "⚠️ $MSG - Apri da terminale per aggiornare" --icon=dbeaver 2>/dev/null || true
+        exec dbeaver
+    fi
 fi
 
-log_info "Recupero link download .deb..."
+echo "⬇️  Download DBeaver $REMOTE_CLEAN..."
+notify-send "DBeaver" "⬇️  Scaricamento DBeaver $REMOTE_CLEAN..." --icon=dbeaver 2>/dev/null || true
+
 DEB_URL=$(echo "$API_RESPONSE" \
     | grep '"browser_download_url"' \
     | grep -i '\.deb' \
@@ -91,42 +125,63 @@ DEB_URL=$(echo "$API_RESPONSE" \
     | grep -oP '"browser_download_url":\s*"\K[^"]+' )
 
 if [ -z "$DEB_URL" ]; then
-    log_warning "Asset non trovato via API, uso URL diretto..."
     DEB_URL="https://github.com/dbeaver/dbeaver/releases/download/${REMOTE_VERSION}/dbeaver-ce_${REMOTE_CLEAN}_amd64.deb"
 fi
 
-log_info "URL: $DEB_URL"
+echo "   URL: $DEB_URL"
 
-log_info "Download DBeaver $REMOTE_CLEAN in corso..."
 TMP_DIR=$(mktemp -d)
-if curl -L --progress-bar "$DEB_URL" -o "$TMP_DIR/dbeaver.deb"; then
-    log_info "Download completato."
-else
-    log_error "Download fallito. Avvio DBeaver con la versione attuale..."
-    rm -rf "$TMP_DIR"
-    notify-send "DBeaver" "❌ Download aggiornamento fallito" --icon=dbeaver 2>/dev/null || true
-    exec dbeaver
+if ! curl -L --max-time 120 "$DEB_URL" -o "$TMP_DIR/dbeaver.deb"; then
+    MSG="❌ Download fallito"
+    echo "$MSG"
+    notify-send "DBeaver" "$MSG" --icon=dbeaver 2>/dev/null || true
+    exit 1
 fi
 
-log_info "Installazione DBeaver $REMOTE_CLEAN..."
-if sudo dpkg -i "$TMP_DIR/dbeaver.deb" && sudo apt-get install -f -y 2>/dev/null; then
-    log_info "Aggiornamento completato con successo!"
-    notify-send "DBeaver" "🎉 Aggiornato a $REMOTE_CLEAN!" --icon=dbeaver 2>/dev/null || true
-else
-    log_error "Installazione fallita. Avvio DBeaver con la versione attuale..."
-    notify-send "DBeaver" "❌ Installazione aggiornamento fallita" --icon=dbeaver 2>/dev/null || true
+if [ ! -s "$TMP_DIR/dbeaver.deb" ]; then
+    MSG="❌ File scaricato vuoto/corrotto"
+    echo "$MSG"
+    notify-send "DBeaver" "$MSG" --icon=dbeaver 2>/dev/null || true
+    exit 1
+fi
+
+EXPECTED_SIZE=$(curl -LsI "$DEB_URL" | grep -i content-length | awk '{print $2}' | tr -d '\r')
+ACTUAL_SIZE=$(stat -c%s "$TMP_DIR/dbeaver.deb" 2>/dev/null)
+if [ -n "$EXPECTED_SIZE" ] && [ "$ACTUAL_SIZE" != "$EXPECTED_SIZE" ]; then
+    MSG="❌ Dimensione non valida (atteso: $EXPECTED_SIZE, ottenuto: $ACTUAL_SIZE)"
+    echo "$MSG"
+    notify-send "DBeaver" "$MSG" --icon=dbeaver 2>/dev/null || true
+    exit 1
+fi
+
+echo "📦 Installazione in corso..."
+notify-send "DBeaver" "📦 Installazione DBeaver $REMOTE_CLEAN..." --icon=dbeaver 2>/dev/null || true
+
+if ! pkexec dpkg -i "$TMP_DIR/dbeaver.deb"; then
+    MSG="❌ Installazione dpkg fallita"
+    echo "$MSG"
+    notify-send "DBeaver" "$MSG" --icon=dbeaver 2>/dev/null || true
+    exit 1
+fi
+
+if ! pkexec apt-get install -f -y 2>/dev/null; then
+    MSG="❌ Installazione dipendenze fallita"
+    echo "$MSG"
+    notify-send "DBeaver" "$MSG" --icon=dbeaver 2>/dev/null || true
+    exit 1
 fi
 
 rm -rf "$TMP_DIR"
+echo "🎉 DBeaver $REMOTE_CLEAN installato con successo!"
+notify-send "DBeaver" "🎉 Aggiornato a $REMOTE_CLEAN!" --icon=dbeaver 2>/dev/null || true
 
-log_info "Avvio DBeaver..."
 exec dbeaver
 SCRIPT
 
 ok "Script dbeaver-update creato."
 
 # ── 2. Rendi eseguibile ──────────────────────────────────
-info "Impostazione permessi eseguibili..."
+info "Permessi eseguibili su dbeaver-update..."
 sudo chmod +x /usr/local/bin/dbeaver-update
 ok "Permessi impostati."
 
@@ -148,7 +203,7 @@ if [ ! -f "$DESKTOP_LOCAL" ]; then
     info "Copio il .desktop di sistema in locale..."
     if [ -n "$DESKTOP_SYSTEM" ]; then
         cp "$DESKTOP_SYSTEM" "$DESKTOP_LOCAL"
-        ok "Copiato da $DESKTOP_SYSTEM"
+        ok "Copiato in $DESKTOP_LOCAL"
     else
         err "File .desktop di DBeaver non trovato! Hai DBeaver installato?"
     fi
@@ -158,7 +213,7 @@ fi
 
 # ── 4. Modifica Exec= ─────────────────────────────────────────
 info "Modifica riga Exec= nel .desktop..."
-sed -i 's|^Exec=.*|Exec=bash -c "dbeaver-update"|' "$DESKTOP_LOCAL"
+sed -i 's|^Exec=.*|Exec=bash -c "dbeaver-update; /usr/bin/dbeaver"|' "$DESKTOP_LOCAL"
 ok "Riga Exec= aggiornata."
 
 # ── 5. Aggiorna database launcher ───────────────────────
@@ -172,7 +227,7 @@ echo "╔═══════════════════════�
 echo "║  Setup completato con successo! 🎉       ║"
 echo "║                                          ║"
 echo "║  Da ora, aprendo DBeaver dal menu app    ║"
-echo "║  verrà chiesto se aggiornare quando      ║"
-echo "║  una nuova versione è disponibile.       ║"
+echo "║  verrà eseguito il check aggiornamento   ║"
+echo "║  automaticamente prima dell'avvio.       ║"
 echo "╚══════════════════════════════════════════╝"
 echo ""
