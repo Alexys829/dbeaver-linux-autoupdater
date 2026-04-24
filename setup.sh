@@ -25,7 +25,7 @@ GITHUB_API="https://api.github.com/repos/dbeaver/dbeaver/releases/latest"
 
 cleanup() {
     rm -f "$LOCK_FILE"
-    rm -rf "$TMP_DIR"
+    [ -n "$TMP_DIR" ] && rm -rf "$TMP_DIR"
 }
 trap cleanup EXIT
 
@@ -62,8 +62,8 @@ echo "🌐 Recupero ultima versione disponibile..."
 notify-send "DBeaver" "🌐 Controllo server..." --icon=dbeaver 2>/dev/null || true
 
 set -o pipefail
-API_RESPONSE=$(curl -fsSL "$GITHUB_API" 2>&1)
-CURL_EXIT=$?
+CURL_EXIT=0
+API_RESPONSE=$(curl -fsSL "$GITHUB_API" 2>&1) || CURL_EXIT=$?
 if [ $CURL_EXIT -ne 0 ]; then
     MSG="❌ Errore curl (exit $CURL_EXIT)"
     echo "$MSG"
@@ -83,7 +83,8 @@ fi
 echo "   Ultima versione: $REMOTE_VERSION"
 REMOTE_CLEAN="${REMOTE_VERSION#v}"
 
-if [ -n "$INSTALLED" ] && [ "$INSTALLED" = "$REMOTE_CLEAN" ]; then
+INSTALLED_BASE="${INSTALLED%%-*}"
+if [ -n "$INSTALLED" ] && [ "$INSTALLED_BASE" = "$REMOTE_CLEAN" ]; then
     echo "✅ DBeaver è già aggiornato ($INSTALLED)."
     notify-send "DBeaver" "✅ Già aggiornato ($INSTALLED)" --icon=dbeaver 2>/dev/null || true
     exit 0
@@ -145,10 +146,8 @@ if [ ! -s "$TMP_DIR/dbeaver.deb" ]; then
     exit 1
 fi
 
-EXPECTED_SIZE=$(curl -LsI "$DEB_URL" | grep -i content-length | awk '{print $2}' | tr -d '\r')
-ACTUAL_SIZE=$(stat -c%s "$TMP_DIR/dbeaver.deb" 2>/dev/null)
-if [ -n "$EXPECTED_SIZE" ] && [ "$ACTUAL_SIZE" != "$EXPECTED_SIZE" ]; then
-    MSG="❌ Dimensione non valida (atteso: $EXPECTED_SIZE, ottenuto: $ACTUAL_SIZE)"
+if ! dpkg-deb --info "$TMP_DIR/dbeaver.deb" >/dev/null 2>&1; then
+    MSG="❌ File .deb non valido o corrotto"
     echo "$MSG"
     notify-send "DBeaver" "$MSG" --icon=dbeaver 2>/dev/null || true
     exit 1
@@ -157,21 +156,13 @@ fi
 echo "📦 Installazione in corso..."
 notify-send "DBeaver" "📦 Installazione DBeaver $REMOTE_CLEAN..." --icon=dbeaver 2>/dev/null || true
 
-if ! pkexec dpkg -i "$TMP_DIR/dbeaver.deb"; then
-    MSG="❌ Installazione dpkg fallita"
+if ! pkexec sh -c "dpkg -i '$TMP_DIR/dbeaver.deb' && apt-get install -f -y"; then
+    MSG="❌ Installazione fallita"
     echo "$MSG"
     notify-send "DBeaver" "$MSG" --icon=dbeaver 2>/dev/null || true
     exit 1
 fi
 
-if ! pkexec apt-get install -f -y 2>/dev/null; then
-    MSG="❌ Installazione dipendenze fallita"
-    echo "$MSG"
-    notify-send "DBeaver" "$MSG" --icon=dbeaver 2>/dev/null || true
-    exit 1
-fi
-
-rm -rf "$TMP_DIR"
 echo "🎉 DBeaver $REMOTE_CLEAN installato con successo!"
 notify-send "DBeaver" "🎉 Aggiornato a $REMOTE_CLEAN!" --icon=dbeaver 2>/dev/null || true
 
